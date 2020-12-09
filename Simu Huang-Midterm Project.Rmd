@@ -1,0 +1,236 @@
+---
+title: "New York Airbnb Analysis"
+author: "Simu Huang"
+date: "2020/12/8"
+output: 
+  pdf_document
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(
+ggplot2,
+knitr,
+arm,
+data.table,
+lubridate,
+dplyr,
+IDPmisc,
+rstanarm,
+bayesplot,
+car,
+lme4,
+gridExtra
+)
+```
+
+# Abstract
+
+In this report, we use the "lm" and "lmer" model to determine if it is possible to predict the price of rentals on Airbnb in New York area, based on the location, room type and other related factors, and choose a more appropriate model from these two models to predict prices.
+
+
+# Introduction
+ 
+For people looking for accommodation, Airbnb is a good choice because it offers a variety of options and is easy to use during travel. Therefore, for travelers, they want to know exactly what will affect the rent and how the rent will change in the future in order to better plan their travel plans.
+
+In this research, we use the dataset containing Airbnb listings in New York State in 2020, including data on prices, rental attributes and locations, to discover whether it is possible to find out the key factors affecting prices and predict rental prices.
+
+# Methods
+
+## Data cleaning and selection
+
+Since most of the available rooms in our data are located in the Manhattan and Brooklyn boroughs, we focus on the price of these two boroughs separately. And select all the data for 2020.
+
+```{r, include=FALSE, message=FALSE}
+#Sys.setlocale("LC_ALL", "English")
+df <- read.csv("listings.csv")
+```
+
+```{r, include=FALSE, message=FALSE}
+#unique(df$neighbourhood_group)
+#unique(df$room_type)
+df$last_review <- ymd(df$last_review)
+#unique(year(df$last_review))
+
+# select the data in 2020
+df_2020 <- filter(df, year(df$last_review) == 2020)
+
+#remove the NA
+#sum(is.na(df_2020))
+#is.null(df_2020)
+df_2020 <- na.omit(df_2020)
+
+#delete some useless columns
+df_2020 %<>% dplyr::select(name, latitude, longitude, neighbourhood_group, room_type, price, minimum_nights, number_of_reviews, reviews_per_month, calculated_host_listings_count, availability_365) %>% 
+  mutate(room_type = as.factor(room_type))
+
+#remove the outlier
+#summary(df_2020$price)
+
+#remove the outliers in 'price'
+#check the outliers
+boxplot_1 <- boxplot(df_2020$price, plot = FALSE) 
+outliers_price <- boxplot(df_2020$price, plot = FALSE)$out
+#delete the ourliers
+df_2020 <- df_2020[-which(df_2020$price %in% outliers_price),]
+#check the result
+boxplot_price <- boxplot(df_2020$price, plot = FALSE)
+
+#remove the outliers in "reviews_per_month" (number of reviews per month)
+#check the outliers
+boxplot_2 <- boxplot(df_2020$reviews_per_month, plot = FALSE)
+outliers_review <- boxplot(df_2020$reviews_per_month, plot = FALSE)$out
+#delete the ourliers
+df_2020 <- df_2020[-which(df_2020$reviews_per_month %in% outliers_review),]
+#check the result
+boxplot_review <- boxplot(df_2020$reviews_per_month, plot = FALSE)
+```
+
+
+# EDA
+
+The figure in the appendix respectively show the price distribution of all available rooms on Airbnb in New York in 2020, the prices of different room types, and the relationship between monthly reviews and prices. We can roughly see that most rooms in Airbub's New York area cost between 50 and 100. Hotel rooms are usually more expensive, and the price range is larger than the other three types. Among the four types of rental housing, shared housing is cheaper. At the same time, there is no obvious linear relationship between the number of reviews and the room price, but we can still see that cheaper rooms have lower frequency of reviews for more expensive rooms.
+
+From the figure, We can see that most of the rooms in Airbnb in New York area locate in the region between longitude -74 to -73.9 and latitude 40.6 to 40.8. And most of the rooms are entire home/apartment and private room. 
+
+# Method
+
+## Modeling
+  
+The variables we use here are the `room_type`, `longitude`, `latitude`, `minimum_nights` (Minimum number of days per booking), `calculated_host_listings_count` (The number of properties owned by the host) and `price` (the room price in dollars).
+
+First, we use the linear model here to find that, if there is a simple linear relationship between prices and other variables. In addition to location and type of the room, the price would go down as the number of minimum-stay increases.
+
+```{r, include=FALSE, message=FALSE}
+#use the linear transformation and logarithmic transformations to make coefficients more interpretable
+df_br <- df_2020 %>% filter(neighbourhood_group == "Brooklyn")
+df_br$longitude <- abs(df_br$longitude)
+df_br$room_type <- as.factor(df_br$room_type)
+mean_latitude_br <- mean(df_br$latitude)
+mean_longitude_br <- mean(df_br$longitude)
+df_br$latitude_diff <- df_br$latitude - mean_latitude_br
+df_br$longitude_diff <- df_br$longitude - mean_longitude_br
+
+#use the linear transformation and logarithmic transformations to make coefficients more interpretable
+df_mh <- df_2020 %>% filter(neighbourhood_group == "Manhattan")
+df_mh$longitude <- abs(df_mh$longitude)
+df_mh$room_type <- as.factor(df_mh$room_type)
+mean_latitude <- mean(df_mh$latitude)
+mean_longitude <- mean(df_mh$longitude)
+df_mh$latitude_diff <- df_mh$latitude - mean_latitude
+df_mh$longitude_diff <- df_mh$longitude - mean_longitude
+```
+
+```{r, include=FALSE, message=FALSE}
+set.seed(1000)
+
+#linear regression of the data of Brooklyn
+fit_br <-lm (log(price) ~ latitude_diff + longitude_diff + room_type + minimum_nights  + room_type * minimum_nights, data = df_br)
+#summary(fit_br)
+
+#linear regression of the data of Manhattan
+df_mh$log_price <- log(df_mh$price)
+df_mh <- NaRV.omit(df_mh)
+fit_mh <- lm (log_price ~ latitude_diff + longitude_diff + room_type + minimum_nights + room_type * minimum_nights, data = df_mh)
+#summary(fit_mh)
+```
+
+The differences between room types can also affect prices so in this step we use the multilevel linear model here to find whether it works.
+
+```{r, include=FALSE, message=FALSE}
+set.seed(1000)
+
+#fit the model in Brooklyn Borough
+df_br$room_type <- as.factor(df_br$room_type)
+fit_br_1 <- lmer (log(price) ~ latitude_diff + longitude_diff + minimum_nights + calculated_host_listings_count + ( 1 | room_type), data = df_br)
+#summary(fit_br_1)
+#print(coef(fit_br_1))
+```
+
+```{r, include=FALSE, message=FALSE}
+set.seed(1000)
+
+#fit the model in Manhattan Borough
+fit_mh_1 <- lmer ((log_price ) ~ latitude_diff + longitude_diff + minimum_nights +calculated_host_listings_count + ( 1 | room_type), data = df_mh)
+#summary(fit_mh_1)
+#print(coef(fit_mh_1))
+```
+
+## Validation
+
+First we check the residual plots of the linear regression model. We can find that most of the points in the residual plot do not follow a straight line and are obviously not evenly distributed. In the residual plot of the linear regression model for Brooklyn, most of the points are concentrated around the fitted value 4.0 and 4.5 to 5.0. For Manhattan, the points in the residual plot are clustered between the 4.0 and 5.0. Therefore, it means that the simple linear model does not work here.
+   
+```{r, fig.cap="Residual Plot", echo=FALSE}
+par(mfrow = c(2,2))
+
+# The residual plot of the "fit_br" lm model
+resid_br <- resid(fit_br)
+p1 <- plot(fitted(fit_br), resid_br, col = "steelblue")
+p1_1 <- p1 + abline(0,0, col = "grey50")
+
+# The residual plot of the "fit_mh" lm model
+resid_mh <- resid(fit_mh)
+p2 <- plot(fitted(fit_mh), resid_mh, col = "steelblue")
+p2_2 <- p2+abline(0,0, col = "grey50")
+
+# The residual plot of the "fit_br_1" lm model
+resid_br <- resid(fit_br_1)
+plot(fitted(fit_br_1), resid_br, col = "steelblue")
+abline(0,0, col = "grey50")
+
+# The residual plot of the "fit_mh_1" lm model
+resid_mh <- resid(fit_mh_1)
+plot(fitted(fit_mh_1), resid_mh,col = "steelblue")
+abline(0,0, col = "grey50")
+```
+
+Then we check the residual plots of the multilevel linear model. Compared to the linear regression result above, although the points in these plots are already more evenly distributed and we can roughly see that they are close to the 0 line. But these points are clearly divided into many parts, and it also proves that the LMER model here cannot contain all the data perfectly.
+
+# Result
+
+## Estimation
+
+In these two boroughs, one the number of minimum nights and the number of property each host own increase, the price will go down. And the availability in a year of the room and the number of times the room information was accessed have a slightly positive effect on the price. In the Brooklyn, for the room in the latitude 40.68 and 73.95, without minimum booking nights and can be booked all year around, the price of the entire home is 131.6 dollars, the price of hotel room is  121.6, the price of private room is 61.6, and the price of 37.8.
+  
+## Predictions
+
+The figure shows that many points are near a line with slope 1 and intercept 0, which means that this model captures some patterns well. But we can clearly see that the predicted prices are clustered in a restricted range. For example, for the private room, most of the predicted value is in the range 50 to 100. It may represent that we lose some features of the data. 
+
+```{r, fig.cap="Plot of observed vs. predicted", echo=FALSE}
+ggplot(data = df_br) + geom_point( aes (x = price, y = exp(predict(fit_br_1))), color = "steelblue" ) + geom_abline(intercept = 0, slope = 1, color = "grey50")  + facet_wrap(~room_type) + labs(title = "The plot of observed vs. predicted price for the data of Brooklyn") 
+
+ggplot(data = df_mh) + geom_point( aes (x = price, y = exp(predict(fit_mh_1))), color = "forestgreen" ) + geom_abline(intercept = 0, slope = 1, color = "grey50") + facet_wrap(~room_type) + labs(title = "The plot of observed vs. predicted price for the data of Manhatten") 
+```
+
+# Discussion
+
+From the modeling process above, we can find that the multilevel linear model is a relatively better model here. The type of room has the biggest impact on prices and different boroughs and locations also have an impact on prices. However, we cannot precisely predict the price based on the predictors that we have in the data. Because in the model, we only conclude the change of location, but what we should consider more is the distance between these rooms and key places in that borough, such as the high street, tourist attractions and public transportation. Besides, there may be other factors that affect prices, such as whether the booked time is a working day or a holiday, but this information does not conclude in the data. For future study, we need data with more detailed information.
+  
+# Appendix
+
+## EDA
+
+```{r, fig.cap="EDA", echo=FALSE}
+#barplot of the price distribution of all available rooms in New York in Airbnb in 2020
+plot_1  <- ggplot(data = df_2020, aes(x = price)) + 
+  geom_histogram(bins=30 ) + labs(title =  ("Price distrubition in 2020"))
+
+#boxplot of the price of different room types
+plot_2  <- ggplot(data = df_2020, aes(x = room_type, y = price, color = price)) + 
+  geom_boxplot() + labs(title =  ("Price of different room types in 2020"))
+
+#the relationship between monthly reviews and prices
+plot_3  <- ggplot(data = df_2020, aes(x = reviews_per_month, y = price)) + 
+  geom_point() + geom_smooth() + labs(title =  ("Number of reviews - Prices"))
+
+plot_1
+plot_2
+plot_3
+
+ggplot(data = df_2020, aes(x = longitude, y = latitude, color = room_type, alpha = price )) + 
+  geom_point() + labs( title = "The distribution of all available rooms")
+```
+
+## Reference
+1: [Airbnb - New York]:(http://insideairbnb.com/get-the-data.html)
+
